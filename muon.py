@@ -432,19 +432,23 @@ class MuonDifferentNorms(torch.optim.Optimizer):
 
     def _calculate_norm(self, g, norm_type, p_val):
         """Calculates the norm of a tensor `g` based on its original dimensions."""
+        # Handle 1D tensors for matrix-specific norms. This fixes the error.
+        if g.ndim < 2:
+            # For a 1D vector, spectral, frobenius, and nuclear norms are all
+            # equivalent to the standard L2 vector norm.
+            return torch.linalg.norm(g)
+
         if norm_type == 'spectral':
-            # For a 1D tensor, this is just the L2 norm.
-            # For >2D tensors, we flatten to 2D first.
-            g_2d = g.view(g.shape[0], -1) if g.ndim > 1 else g
+            g_2d = g.view(g.shape[0], -1)
             return torch.linalg.norm(g_2d, ord=2)
         elif norm_type == 'frobenius':
             return torch.linalg.norm(g, ord='fro')
         elif norm_type == 'nuclear':
-            g_2d = g.view(g.shape[0], -1) if g.ndim > 1 else g
+            g_2d = g.view(g.shape[0], -1)
             return torch.linalg.norm(g_2d, ord='nuc')
         elif norm_type == 'spatial':
             if g.ndim < 3:
-                # Fallback for tensors with less than 3 dims (e.g. Linear layers)
+                # Fallback for 2D tensors (e.g. Linear layers).
                 # Reverts to frobenius norm as a sensible default.
                 return torch.linalg.norm(g, ord='fro')
             
