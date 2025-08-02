@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='muons',
-    version='0.1.0',
+    version='0.1.1',
     author='Saurabh Page',
     author_email='saurabhpage1@gmail.com',
     description='Muon opimizers',
