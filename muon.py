@@ -503,10 +503,6 @@ class MuonDifferentNorms(torch.optim.Optimizer):
                 if g is None:
                     continue
 
-                # This is the key change: calculate the norm on the original gradient shape
-                # before any modifications like momentum or reshaping.
-                precomputed_norm = self._calculate_norm(g, norm, p_val)
-
                 is_diagonal_param = self.state[p].get('is_diagonal_param', False)
                 
                 if is_diagonal_param:
@@ -525,6 +521,10 @@ class MuonDifferentNorms(torch.optim.Optimizer):
                     g_for_ns = g_2d.add(buf, alpha=momentum)
                 else:
                     g_for_ns = buf
+
+                # Corrected logic: Calculate the norm on the momentum-accumulated
+                # gradient (`g_for_ns`), not the raw gradient `g`.
+                precomputed_norm = self._calculate_norm(g_for_ns, norm, p_val)
 
                 g_orthogonalized = self.zeropower_via_newtonschulz5(
                     g_for_ns, precomputed_norm, steps=ns_steps
