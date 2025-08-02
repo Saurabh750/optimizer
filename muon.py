@@ -412,3 +412,125 @@ class MuonOneDimtoTwoDim(torch.optim.Optimizer):
                 
                 # Apply the update
                 p.data.add_(update_tensor, alpha=-lr)
+
+
+# Use different norms for Muon
+class MuonDifferentNorms(torch.optim.Optimizer):
+    def __init__(self, params, muon_selector=None, lr=0.02, momentum=0.95, nesterov=True, ns_steps=6, norm='spectral', p=2):
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, norm=norm, p=p)
+
+        if muon_selector is None:
+            muon_selector = lambda name, param: param.requires_grad
+        
+        named_params = list(params)
+        muon_params = [p for n, p in named_params if muon_selector(n, p)]
+        
+        super().__init__(muon_params, defaults)
+
+        for p in self.param_groups[0]['params']:
+            self.state[p]['is_diagonal_param'] = (p.ndim == 1)
+
+    def _calculate_norm(self, g, norm_type, p_val):
+        """Calculates the norm of a tensor `g` based on its original dimensions."""
+        if norm_type == 'spectral':
+            # For a 1D tensor, this is just the L2 norm.
+            # For >2D tensors, we flatten to 2D first.
+            g_2d = g.view(g.shape[0], -1) if g.ndim > 1 else g
+            return torch.linalg.norm(g_2d, ord=2)
+        elif norm_type == 'frobenius':
+            return torch.linalg.norm(g, ord='fro')
+        elif norm_type == 'nuclear':
+            g_2d = g.view(g.shape[0], -1) if g.ndim > 1 else g
+            return torch.linalg.norm(g_2d, ord='nuc')
+        elif norm_type == 'spatial':
+            if g.ndim < 3:
+                # Fallback for tensors with less than 3 dims (e.g. Linear layers)
+                # Reverts to frobenius norm as a sensible default.
+                return torch.linalg.norm(g, ord='fro')
+            
+            # This was the incorrect line. It flattened spatial and channel dims
+            # and took the norm across the wrong dimension.
+            # return g.flatten(start_dim=2).norm(p=p_val, dim=1).max()
+
+            # Corrected logic:
+            # For a tensor like [C_out, C_in, H, W], calculate the p-norm
+            # over the spatial dimensions (H, W) for each filter.
+            spatial_dims = tuple(range(2, g.ndim))
+            # This results in a tensor of norms with shape [C_out, C_in].
+            per_filter_norms = torch.linalg.norm(g, ord=p_val, dim=spatial_dims)
+            # Return the maximum norm among all filters.
+            return per_filter_norms.max()
+        else:
+            raise ValueError(f"Unknown norm type: {norm_type}")
+
+    def zeropower_via_newtonschulz5(self, G, precomputed_norm, steps=10, eps=1e-7):
+        """
+        Newton-Schulz iteration using a pre-computed norm for normalization.
+        """
+        assert len(G.shape) == 2
+        a, b, c = (3.4445, -4.7750,  2.0315)
+        X = G.bfloat16()
+        
+        # Use the pre-computed norm
+        X /= (precomputed_norm + eps)
+        
+        if G.size(0) > G.size(1):
+            X = X.T
+        for _ in range(steps):
+            A = X @ X.T
+            B = b * A + c * A @ A
+            X = a * X + B @ X
+        if G.size(0) > G.size(1):
+            X = X.T
+        return X
+
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr, momentum, nesterov = group["lr"], group['momentum'], group['nesterov']
+            ns_steps, norm, p_val = group['ns_steps'], group['norm'], group['p']
+
+            for p in group['params']:
+                g = p.grad
+                if g is None:
+                    continue
+
+                # This is the key change: calculate the norm on the original gradient shape
+                # before any modifications like momentum or reshaping.
+                precomputed_norm = self._calculate_norm(g, norm, p_val)
+
+                is_diagonal_param = self.state[p].get('is_diagonal_param', False)
+                
+                if is_diagonal_param:
+                    g_2d = torch.diag(g)
+                else:
+                    g_2d = g.view(g.size(0), -1)
+
+                state = self.state[p]
+                if 'momentum_buffer' not in state:
+                    state['momentum_buffer'] = torch.zeros_like(g_2d)
+                
+                buf = state['momentum_buffer']
+                buf.mul_(momentum).add_(g_2d)
+
+                if nesterov:
+                    g_for_ns = g_2d.add(buf, alpha=momentum)
+                else:
+                    g_for_ns = buf
+
+                g_orthogonalized = self.zeropower_via_newtonschulz5(
+                    g_for_ns, precomputed_norm, steps=ns_steps
+                )
+                
+                g_scaled = g_orthogonalized * max(1, g_orthogonalized.size(0)/g_orthogonalized.size(1))**0.5
+
+                if is_diagonal_param:
+                    update_tensor = torch.diag(g_scaled)
+                else:
+                    update_tensor = g_scaled
+                
+                p.data.add_(update_tensor.view_as(p.data).type_as(p.data), alpha=-lr)
