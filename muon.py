@@ -492,22 +492,64 @@ class MuonSpatialp(torch.optim.Optimizer):
         schatten_norm = self.schatten_p_norm(X, p, eps)
         return X / schatten_norm
 
+    # def zeropower_via_newtonschulz5(self, G, steps=10, eps=1e-7, schatten_p=None):
+    #     """
+    #     Newton-Schulz iteration with optional Schatten-p norm normalization.
+    #     """
+    #     assert len(G.shape) == 2
+    #     a, b, c = (3.4445, -4.7750, 2.0315)
+    #     X = G.bfloat16()
+        
+    #     # Use Schatten-p norm for normalization if specified, otherwise use default Frobenius
+    #     if schatten_p is not None and schatten_p != 2:
+    #         # Normalize using Schatten-p norm
+    #         X = self.normalize_by_schatten_p(X, schatten_p, eps)
+    #     else:
+    #         # Default Frobenius norm (Schatten-2 norm)
+    #         X /= (X.norm() + eps)
+
+    #     if G.size(0) > G.size(1):
+    #         X = X.T
+    #     for _ in range(steps):
+    #         A = X @ X.T
+    #         B = b * A + c * A @ A
+    #         X = a * X + B @ X
+    #     if G.size(0) > G.size(1):
+    #         X = X.T
+    #     return X
+
     def zeropower_via_newtonschulz5(self, G, steps=10, eps=1e-7, schatten_p=None):
         """
-        Newton-Schulz iteration with optional Schatten-p norm normalization.
+        Newton-Schulz with smart dtype handling.
         """
         assert len(G.shape) == 2
         a, b, c = (3.4445, -4.7750, 2.0315)
+        
+        # Start with bfloat16 as in original
         X = G.bfloat16()
         
-        # Use Schatten-p norm for normalization if specified, otherwise use default Frobenius
-        if schatten_p is not None and schatten_p != 2:
-            # Normalize using Schatten-p norm
-            X = self.normalize_by_schatten_p(X, schatten_p, eps)
-        else:
-            # Default Frobenius norm (Schatten-2 norm)
+        # Smart normalization strategy
+        if schatten_p is None or schatten_p == 2:
+            # Use fast Frobenius norm (no SVD needed)
             X /= (X.norm() + eps)
+        elif schatten_p == float('inf'):
+            # Spectral norm approximation using power iteration (faster than SVD)
+            X_float = X.float()
+            # Simple power iteration approximation for largest singular value
+            v = torch.randn(X_float.size(1), device=X_float.device, dtype=torch.float32)
+            for _ in range(3):  # Few iterations for approximation
+                v = X_float.T @ (X_float @ v)
+                v = v / v.norm()
+            spectral_approx = torch.norm(X_float @ v)
+            X /= (spectral_approx.to(X.dtype) + eps)
+        else:
+            # For p=1 or other values, temporarily use float32
+            X_float = X.float()
+            s = torch.linalg.svdvals(X_float)
+            schatten_norm = torch.norm(s, p=schatten_p)
+            X /= (schatten_norm.to(X.dtype) + eps)
 
+        # Continue with Newton-Schulz iterations in bfloat16
         if G.size(0) > G.size(1):
             X = X.T
         for _ in range(steps):
