@@ -415,32 +415,27 @@ class MuonOneDimtoTwoDim(torch.optim.Optimizer):
 
 
 class MuonSpatialp(torch.optim.Optimizer):
+    """
+    MuonSpatialp - Muon optimizer variant using spatial-p norm instead of Frobenius norm
+    
+    This variant replaces the Frobenius norm in Newton-Schulz iteration with spatial-p norm,
+    which handles higher-dimensional tensors by computing norms across spatial dimensions.
+    """
     def __init__(self, params, muon_selector=None, lr=0.02, momentum=0.95, nesterov=True, 
-                 ns_steps=6, schatten_p=2, schatten_eps=1e-7):
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps,
-                       schatten_p=schatten_p, schatten_eps=schatten_eps)
+                 ns_steps=6, p=2):
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, p=p)
 
-        # Corrected muon_selector logic:
-        # If a custom selector is not provided, we define one that includes
-        # *all* parameters that require gradients.
-        # This means all parameters will now attempt to be processed by Muon.
-        # The logic for 1D to 2D conversion will then be handled in the step() method.
         if muon_selector is None:
             muon_selector = lambda name, param: param.requires_grad
         
         named_params = list(params)
-        
-        # Now, all parameters that require gradients (based on the new selector)
-        # will be directed to the Muon processing path.
         muon_params = [p for n, p in named_params if muon_selector(n, p)]
         
         super().__init__(muon_params, defaults)
 
         def assign_param_type(p):
-            self.state[p]['use_muon'] = 1 # Mark for Muon processing
+            self.state[p]['use_muon'] = 1
             if p.ndim == 1:
-                # This flag indicates that the parameter needs to be treated as
-                # a diagonal matrix in the step() function.
                 self.state[p]['is_diagonal_param'] = True
             else:
                 self.state[p]['is_diagonal_param'] = False
@@ -460,104 +455,59 @@ class MuonSpatialp(torch.optim.Optimizer):
             self.world_size = 1
             self.rank = 0
 
-    def schatten_p_norm(self, X, p, eps=1e-7):
+    def spatial_p_norm(self, X, p=2, eps=1e-7):
         """
-        Compute Schatten-p norm of matrix X.
+        Compute spatial-p norm with bfloat16 compatibility.
         
         Args:
-            X: Input matrix
-            p: The p value for Schatten-p norm (can be any real number >= 1)
-            eps: Small epsilon to avoid numerical issues
+            X: Input tensor (2D matrix)
+            p: The p value for spatial norm
+            eps: Small epsilon for numerical stability
             
         Returns:
-            Schatten-p norm value
+            Spatial-p norm value
         """
-        # Compute singular values
-        s = torch.linalg.svdvals(X)
-        # Compute Schatten-p norm as p-norm of singular values
-        return torch.norm(s, p=p) + eps
-
-    def normalize_by_schatten_p(self, X, p, eps=1e-7):
-        """
-        Normalize matrix X by its Schatten-p norm.
-        
-        Args:
-            X: Input matrix to normalize
-            p: The p value for Schatten-p norm
-            eps: Small epsilon to avoid division by zero
+        # Handle bfloat16 compatibility - convert to float32 for norm calculation
+        if X.dtype == torch.bfloat16:
+            X_calc = X.float()
+        else:
+            X_calc = X
             
-        Returns:
-            Normalized matrix
-        """
-        schatten_norm = self.schatten_p_norm(X, p, eps)
-        return X / schatten_norm
-
-    # def zeropower_via_newtonschulz5(self, G, steps=10, eps=1e-7, schatten_p=None):
-    #     """
-    #     Newton-Schulz iteration with optional Schatten-p norm normalization.
-    #     """
-    #     assert len(G.shape) == 2
-    #     a, b, c = (3.4445, -4.7750, 2.0315)
-    #     X = G.bfloat16()
+        # For 2D matrices, spatial norm is computed as norm across the last dimension
+        # then we take the norm of those norms
+        spatial_norms = X_calc.norm(p=p, dim=1)  # Norm across each row
+        total_norm = spatial_norms.norm(p=p)  # Norm of the row norms
         
-    #     # Use Schatten-p norm for normalization if specified, otherwise use default Frobenius
-    #     if schatten_p is not None and schatten_p != 2:
-    #         # Normalize using Schatten-p norm
-    #         X = self.normalize_by_schatten_p(X, schatten_p, eps)
-    #     else:
-    #         # Default Frobenius norm (Schatten-2 norm)
-    #         X /= (X.norm() + eps)
+        return total_norm + eps
 
-    #     if G.size(0) > G.size(1):
-    #         X = X.T
-    #     for _ in range(steps):
-    #         A = X @ X.T
-    #         B = b * A + c * A @ A
-    #         X = a * X + B @ X
-    #     if G.size(0) > G.size(1):
-    #         X = X.T
-    #     return X
-
-    def zeropower_via_newtonschulz5(self, G, steps=10, eps=1e-7, schatten_p=None):
+    def zeropower_via_newtonschulz5_spatial(self, G, steps=10, eps=1e-7, p=2):
         """
-        Newton-Schulz with smart dtype handling.
+        Newton-Schulz iteration using spatial-p norm instead of Frobenius norm.
         """
         assert len(G.shape) == 2
         a, b, c = (3.4445, -4.7750, 2.0315)
-        
-        # Start with bfloat16 as in original
         X = G.bfloat16()
         
-        # Smart normalization strategy
-        if schatten_p is None or schatten_p == 2:
-            # Use fast Frobenius norm (no SVD needed)
-            X /= (X.norm() + eps)
-        elif schatten_p == float('inf'):
-            # Spectral norm approximation using power iteration (faster than SVD)
-            X_float = X.float()
-            # Simple power iteration approximation for largest singular value
-            v = torch.randn(X_float.size(1), device=X_float.device, dtype=torch.float32)
-            for _ in range(3):  # Few iterations for approximation
-                v = X_float.T @ (X_float @ v)
-                v = v / v.norm()
-            spectral_approx = torch.norm(X_float @ v)
-            X /= (spectral_approx.to(X.dtype) + eps)
-        else:
-            # For p=1 or other values, temporarily use float32
-            X_float = X.float()
-            s = torch.linalg.svdvals(X_float)
-            schatten_norm = torch.norm(s, p=schatten_p)
-            X /= (schatten_norm.to(X.dtype) + eps)
-
-        # Continue with Newton-Schulz iterations in bfloat16
+        # Use spatial-p norm for normalization (handles bfloat16 internally)
+        spatial_norm = self.spatial_p_norm(X, p=p, eps=eps)
+        
+        # Convert back to original dtype for division
+        if X.dtype == torch.bfloat16:
+            spatial_norm = spatial_norm.to(torch.bfloat16)
+            
+        X /= spatial_norm
+        
         if G.size(0) > G.size(1):
             X = X.T
+            
         for _ in range(steps):
             A = X @ X.T
             B = b * A + c * A @ A
             X = a * X + B @ X
+            
         if G.size(0) > G.size(1):
             X = X.T
+            
         return X
 
     def step(self, closure=None):
@@ -572,15 +522,14 @@ class MuonSpatialp(torch.optim.Optimizer):
             momentum = group['momentum']
             nesterov = group['nesterov']
             ns_steps = group['ns_steps']
-            schatten_p = group['schatten_p']  # New parameter
-            schatten_eps = group['schatten_eps']  # New parameter
+            p = group['p']  # Spatial-p norm parameter
 
-            for p in group['params']:
-                g = p.grad
+            for param in group['params']:
+                g = param.grad
                 if g is None:
                     continue
 
-                is_diagonal_param = self.state[p].get('is_diagonal_param', False)
+                is_diagonal_param = self.state[param].get('is_diagonal_param', False)
                 
                 # Standardize gradient to 2D for Muon processing
                 if is_diagonal_param:
@@ -595,7 +544,7 @@ class MuonSpatialp(torch.optim.Optimizer):
                 else:
                     g_2d = g
 
-                state = self.state[p]
+                state = self.state[param]
                 if 'momentum_buffer' not in state:
                     state['momentum_buffer'] = torch.zeros_like(g_2d)
                 buf = state['momentum_buffer']
@@ -607,9 +556,9 @@ class MuonSpatialp(torch.optim.Optimizer):
                 else:
                     g_for_ns = buf
 
-                # Use Schatten-p norm in Newton-Schulz iteration
-                g_orthogonalized = self.zeropower_via_newtonschulz5(
-                    g_for_ns, steps=ns_steps, eps=schatten_eps, schatten_p=schatten_p
+                # Use spatial-p norm in Newton-Schulz iteration
+                g_orthogonalized = self.zeropower_via_newtonschulz5_spatial(
+                    g_for_ns, steps=ns_steps, eps=1e-7, p=p
                 )
                 
                 # Muon's specific scaling for rectangular matrices
@@ -618,11 +567,12 @@ class MuonSpatialp(torch.optim.Optimizer):
                 # Convert back to original parameter shape
                 if is_diagonal_param:
                     update_tensor = torch.diag(g_scaled)
-                    update_tensor = update_tensor.view_as(p.data).type_as(p.data)
+                    update_tensor = update_tensor.view_as(param.data).type_as(param.data)
                 else:
-                    update_tensor = g_scaled.view_as(p.data).type_as(p.data)
+                    update_tensor = g_scaled.view_as(param.data).type_as(param.data)
                 
                 # Apply the update
-                p.data.add_(update_tensor, alpha=-lr)
+                param.data.add_(update_tensor, alpha=-lr)
 
         return loss
+
