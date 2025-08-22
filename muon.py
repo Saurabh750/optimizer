@@ -455,7 +455,7 @@ class MuonSchattenp(torch.optim.Optimizer):
             self.world_size = 1
             self.rank = 0
 
-    def schatten_p_norm(X, p=2, eps=1e-7):
+    def schatten_p_norm(X, p, eps=1e-7):
         """
         Compute Schatten-p norm of a 2D matrix.
 
@@ -481,7 +481,7 @@ class MuonSchattenp(torch.optim.Optimizer):
             s = torch.linalg.svdvals(X_calc)
             return (torch.sum(s**p))**(1.0/p) + eps
 
-    def zeropower_via_newtonschulz5_schatten(self, G, steps=10, eps=1e-7, p=2):
+    def zeropower_via_newtonschulz5_schatten(self, G, p, steps=10):
         """
         Newton-Schulz iteration using schatten-p norm instead of Frobenius norm.
         """
@@ -490,7 +490,7 @@ class MuonSchattenp(torch.optim.Optimizer):
         X = G.bfloat16()
         
         # Use schatten-p norm for normalization (handles bfloat16 internally)
-        schatten_norm = self.schatten_p_norm(X, p=p, eps=eps)
+        schatten_norm = self.schatten_p_norm(X, p)
         
         # Convert back to original dtype for division
         if X.dtype == torch.bfloat16:
@@ -559,7 +559,7 @@ class MuonSchattenp(torch.optim.Optimizer):
 
                 # Use schatten-p norm in Newton-Schulz iteration
                 g_orthogonalized = self.zeropower_via_newtonschulz5_schatten(
-                    g_for_ns, steps=ns_steps, eps=1e-7, p=p
+                    g_for_ns, p, steps=ns_steps
                 )
                 
                 # Muon's specific scaling for rectangular matrices
