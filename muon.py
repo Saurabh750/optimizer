@@ -455,7 +455,7 @@ class MuonSchattenp(torch.optim.Optimizer):
             self.world_size = 1
             self.rank = 0
 
-    def schatten_p_norm(X, p, eps=1e-7):
+    def schatten_p_norm(self, X, p, eps=1e-7):
         """
         Compute Schatten-p norm of a 2D matrix.
 
