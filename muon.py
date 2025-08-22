@@ -414,12 +414,12 @@ class MuonOneDimtoTwoDim(torch.optim.Optimizer):
                 p.data.add_(update_tensor, alpha=-lr)
 
 
-class MuonSpatialp(torch.optim.Optimizer):
+class MuonSchattenp(torch.optim.Optimizer):
     """
-    MuonSpatialp - Muon optimizer variant using spatial-p norm instead of Frobenius norm
+    MuonSchattenp - Muon optimizer variant using schatten-p norm instead of Frobenius norm
     
-    This variant replaces the Frobenius norm in Newton-Schulz iteration with spatial-p norm,
-    which handles higher-dimensional tensors by computing norms across spatial dimensions.
+    This variant replaces the Frobenius norm in Newton-Schulz iteration with schatten-p norm,
+    which handles higher-dimensional tensors by computing norms across schatten dimensions.
     """
     def __init__(self, params, muon_selector=None, lr=0.02, momentum=0.95, nesterov=True, 
                  ns_steps=6, p=2):
@@ -455,47 +455,48 @@ class MuonSpatialp(torch.optim.Optimizer):
             self.world_size = 1
             self.rank = 0
 
-    def spatial_p_norm(self, X, p=2, eps=1e-7):
+    def schatten_p_norm(X, p=2, eps=1e-7):
         """
-        Compute spatial-p norm with bfloat16 compatibility.
-        
+        Compute Schatten-p norm of a 2D matrix.
+
         Args:
             X: Input tensor (2D matrix)
-            p: The p value for spatial norm
+            p: The p value for the norm (can be float('inf') for spectral norm)
             eps: Small epsilon for numerical stability
-            
+
         Returns:
-            Spatial-p norm value
+            Schatten-p norm value
         """
-        # Handle bfloat16 compatibility - convert to float32 for norm calculation
+        # Handle bfloat16 compatibility
         if X.dtype == torch.bfloat16:
             X_calc = X.float()
         else:
             X_calc = X
-            
-        # For 2D matrices, spatial norm is computed as norm across the last dimension
-        # then we take the norm of those norms
-        spatial_norms = X_calc.norm(p=p, dim=1)  # Norm across each row
-        total_norm = spatial_norms.norm(p=p)  # Norm of the row norms
-        
-        return total_norm + eps
 
-    def zeropower_via_newtonschulz5_spatial(self, G, steps=10, eps=1e-7, p=2):
+        if p == float('inf'):
+            # Spectral norm = largest singular value
+            return torch.linalg.norm(X_calc, ord=2) + eps
+        else:
+            # Compute singular values
+            s = torch.linalg.svdvals(X_calc)
+            return (torch.sum(s**p))**(1.0/p) + eps
+
+    def zeropower_via_newtonschulz5_schatten(self, G, steps=10, eps=1e-7, p=2):
         """
-        Newton-Schulz iteration using spatial-p norm instead of Frobenius norm.
+        Newton-Schulz iteration using schatten-p norm instead of Frobenius norm.
         """
         assert len(G.shape) == 2
         a, b, c = (3.4445, -4.7750, 2.0315)
         X = G.bfloat16()
         
-        # Use spatial-p norm for normalization (handles bfloat16 internally)
-        spatial_norm = self.spatial_p_norm(X, p=p, eps=eps)
+        # Use schatten-p norm for normalization (handles bfloat16 internally)
+        schatten_norm = self.schatten_p_norm(X, p=p, eps=eps)
         
         # Convert back to original dtype for division
         if X.dtype == torch.bfloat16:
-            spatial_norm = spatial_norm.to(torch.bfloat16)
+            schatten_norm = schatten_norm.to(torch.bfloat16)
             
-        X /= spatial_norm
+        X /= schatten_norm
         
         if G.size(0) > G.size(1):
             X = X.T
@@ -522,7 +523,7 @@ class MuonSpatialp(torch.optim.Optimizer):
             momentum = group['momentum']
             nesterov = group['nesterov']
             ns_steps = group['ns_steps']
-            p = group['p']  # Spatial-p norm parameter
+            p = group['p']  # schatten-p norm parameter
 
             for param in group['params']:
                 g = param.grad
@@ -556,8 +557,8 @@ class MuonSpatialp(torch.optim.Optimizer):
                 else:
                     g_for_ns = buf
 
-                # Use spatial-p norm in Newton-Schulz iteration
-                g_orthogonalized = self.zeropower_via_newtonschulz5_spatial(
+                # Use schatten-p norm in Newton-Schulz iteration
+                g_orthogonalized = self.zeropower_via_newtonschulz5_schatten(
                     g_for_ns, steps=ns_steps, eps=1e-7, p=p
                 )
                 
