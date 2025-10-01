@@ -1,1 +1,4 @@
 .env
+norm_discussion_summary.txt
+*.ipynb
+analyze_sv.py
